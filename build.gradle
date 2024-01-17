@@ -5,6 +5,8 @@ plugins {
     id 'idea'
 }
 
+version = modversion
+group = modgroup
 base {
     archivesName = modid
     sourceCompatibility = JavaVersion.VERSION_1_8
