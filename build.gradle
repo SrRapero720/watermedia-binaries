@@ -5,22 +5,11 @@ plugins {
     id 'idea'
 }
 
-version = modversion
-group = modgroup
 base {
-    archivesName = modid
-    sourceCompatibility = JavaVersion.VERSION_1_8
-    targetCompatibility = JavaVersion.VERSION_1_8
+    archivesName = project.id
+    version = project.version
 }
 
-/* CONFIGURATION TO SHADOW DEPENDENCIES - */
-configurations {
-    library
-    implementation.extendsFrom library
-}
-
-println "Gradle Java: ${JavaVersion.current()}"
-println "Mod ID: ${modid}"
 repositories {
     mavenCentral()
     maven { url 'https://maven.fabricmc.net/' }
@@ -37,11 +26,10 @@ dependencies {
     // MOCKERS
     compileOnly project(':lib-neoforge')
     compileOnly project(':lib-forge')
-    compileOnly("net.fabricmc:fabric-loader:${fabricV}") { // FABRIC LOADER SUPPORT
+    compileOnly("net.fabricmc:fabric-loader:${fbversion}") { // FABRIC LOADER SUPPORT
         exclude group: 'org.slf4j', module: 'slf4j-api'
     }
 }
-
 // Process target resources with mod info
 processResources {
     filesMatching(['META-INF/mods.toml', 'pack.mcmeta', 'fabric.mod.json', "mcmod.info", "watermedia/version.cfg"]) {
@@ -60,20 +48,19 @@ processResources {
 jar {
     manifest {
         attributes([
-                "Specification-Title"       : modname,
+                "Specification-Title"       : name,
                 "Specification-Vendor"      : modauthor,
-                "Specification-Version"     : modversion,
-                "Implementation-Title"      : modname,
-                "Implementation-Version"    : modversion,
+                "Specification-Version"     : version,
+                "Implementation-Title"      : name,
+                "Implementation-Version"    : version,
                 "Implementation-Vendor"     : modauthor,
                 "Implementation-Timestamp"  : new Date().format("yyyy-MM-dd'T'HH:mm:ssZ"),
+                "ForceLoadAsMod"            : "true"
         ])
-    }
-    from(configurations.library.collect { it.isDirectory() ? it : zipTree(it) }) {
-        exclude 'META-INF', 'META-INF/**'
     }
 }
 
 tasks.withType(JavaCompile).configureEach {
     it.options.encoding = 'UTF-8'
+    dependsOn(project.rootProject.tasks.shadowJar)
 }

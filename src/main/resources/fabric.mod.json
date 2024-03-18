@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "${modid}",
-  "version": "${modversion}",
-  "name": "${modname}",
-  "description": "${moddescription}",
+  "id": "${id}",
+  "version": "${version}",
+  "name": "${name}",
+  "description": "${moddesc}",
   "authors": ${modauthorlist},
   "contact": {
     "homepage": "https://www.curseforge.com/minecraft/mc-mods/watermedia/",
