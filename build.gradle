@@ -44,7 +44,6 @@ processResources {
     outputs.upToDateWhen { false }
 }
 
-// DO NOT RUN
 jar {
     manifest {
         attributes([
