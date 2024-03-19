@@ -1,9 +1,0 @@
-Manifest-Version: 1.0
-Specification-Title: jar
-Specification-Vendor: SrRapero720
-Specification-Version: 2.1
-Implementation-Title: jar
-Implementation-Version: 2.1
-Implementation-Vendor: SrRapero720
-Implementation-Timestamp: 2024-03-02T00:43:26-0600
-
