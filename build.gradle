@@ -1,10 +1,5 @@
 import groovy.json.JsonOutput
 
-plugins {
-    id 'java'
-    id 'idea'
-}
-
 base {
     archivesName = project.id
     version = project.version
