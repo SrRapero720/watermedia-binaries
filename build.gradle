@@ -1,5 +1,3 @@
-import groovy.json.JsonOutput
-
 base {
     archivesName = project.id
     version = project.version
@@ -25,19 +23,6 @@ dependencies {
         exclude group: 'org.slf4j', module: 'slf4j-api'
     }
 }
-// Process target resources with mod info
-processResources {
-    filesMatching(['META-INF/mods.toml', 'pack.mcmeta', 'fabric.mod.json', "mcmod.info", "watermedia/version.cfg"]) {
-        def combinedMap = [:]
-        combinedMap.putAll(rootProject.properties)
-        combinedMap.putAll([
-                modauthorlist: JsonOutput.toJson(modauthor.trim().replaceAll(" ", "").split(","))
-        ])
-
-        expand(combinedMap)
-    }
-    outputs.upToDateWhen { false }
-}
 
 jar {
     manifest {
@@ -55,6 +40,5 @@ jar {
 }
 
 tasks.withType(JavaCompile).configureEach {
-    it.options.encoding = 'UTF-8'
     dependsOn(project.rootProject.tasks.shadowJar)
 }
