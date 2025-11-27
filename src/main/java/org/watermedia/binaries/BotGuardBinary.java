@@ -1,0 +1,157 @@
+package org.watermedia.binaries;
+
+import org.tukaani.xz.XZInputStream;
+import org.watermedia.tools.IOTool;
+
+import java.io.BufferedInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.URI;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Properties;
+import java.util.zip.ZipFile;
+import java.util.zip.CRC32;
+
+/** Installs the reviewed BotGuard release pinned by WaterMedia's native trust manifest. */
+public final class BotGuardBinary extends ExecutableBinary {
+    private static final long MAX_EXECUTABLE_BYTES = 256L << 20;
+    private static final int BUFFER_SIZE = 65_536;
+
+    public BotGuardBinary() {
+        super(WaterMediaBinaries.BOTGUARD_ID, switch (IOTool.platform()) {
+            case "windows-x86_64" -> "rustypipe-botguard.exe";
+            case "linux-x86_64", "linux-aarch64", "macos-x86_64", "macos-aarch64" -> "rustypipe-botguard";
+            default -> null;
+        }, "watermedia.botguard.binary");
+    }
+
+    // ==========================================================================
+    // PUBLIC API
+    // ==========================================================================
+    /** Returns the snapshot cache belonging to the verified executable installation. */
+    public Path snapshot() throws IOException {
+        final String hash = IOTool.sha256(this.executable());
+        final Path snapshots = Files.createDirectories(WaterMediaBinaries.binaryDir(WaterMediaBinaries.BOTGUARD_ID).resolve("snapshots"));
+        return snapshots.resolve(hash + ".bin");
+    }
+
+    // ==========================================================================
+    // INTERNAL API
+    // ==========================================================================
+    @Override
+    protected Release latest() throws IOException {
+        final var pins = new Properties();
+        try (final var input = BotGuardBinary.class.getResourceAsStream("/META-INF/botguard-pins.properties")) {
+            if (input == null) throw new IOException("BotGuard trust manifest is missing");
+            pins.load(input);
+        }
+        try {
+            final String key = IOTool.platform();
+            return new Release(pins.getProperty("version"), URI.create(pins.getProperty(key + ".url")), pins.getProperty(key + ".sha256"));
+        } catch (final RuntimeException e) {
+            throw new IOException("Invalid BotGuard trust manifest for " + IOTool.platform(), e);
+        }
+    }
+
+    @Override
+    protected void extract(final Path archive, final Path executable) throws IOException {
+        extract(archive, executable, this.name);
+    }
+
+    // WINDOWS RELEASES ARE A ZIP AND THE REST A .tar.xz; EITHER WAY ONLY THE ENTRY CALLED name IS WRITTEN, SIZE-CAPPED
+    // AND CHECKED (CRC FOR THE ZIP, HEADER CHECKSUMS AND THE XZ CHECK FOR THE TAR)
+    static void extract(final Path archive, final Path executable, final String name) throws IOException {
+        if (name.endsWith(".exe")) {
+            try (final var zip = new ZipFile(archive.toFile())) {
+                final var entries = zip.stream().filter(entry -> entry.getName().equals(name)).toList();
+                if (entries.size() != 1 || entries.get(0).isDirectory() || entries.get(0).getSize() <= 0 || entries.get(0).getSize() > MAX_EXECUTABLE_BYTES)
+                    throw new IOException("BotGuard archive lacks one valid " + name);
+                final var entry = entries.get(0);
+                final var crc = new CRC32();
+                long total = 0;
+                try (final var input = zip.getInputStream(entry); final var output = Files.newOutputStream(executable)) {
+                    final byte[] buffer = new byte[BUFFER_SIZE];
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        total += count;
+                        if (total > MAX_EXECUTABLE_BYTES) throw new IOException("BotGuard executable exceeds its size limit");
+                        output.write(buffer, 0, count);
+                        crc.update(buffer, 0, count);
+                    }
+                }
+                if (total != entry.getSize() || crc.getValue() != entry.getCrc()) throw new IOException("BotGuard ZIP entry failed CRC or size validation");
+            }
+            return;
+        }
+        try (final InputStream input = new XZInputStream(new BufferedInputStream(Files.newInputStream(archive)), BUFFER_SIZE)) {
+            final byte[] header = new byte[512];
+            final byte[] buffer = new byte[BUFFER_SIZE];
+            boolean found = false;
+            long total = 0;
+            while (true) {
+                if (input.readNBytes(header, 0, header.length) != header.length) throw new IOException("Truncated BotGuard TAR header");
+                boolean zero = true;
+                for (final byte value: header) zero &= value == 0;
+                if (zero) {
+                    // DRAIN TO VALIDATE THE XZ CHECKSUM; TAR PADDING AFTER ITS END MUST BE ZERO
+                    int count;
+                    while ((count = input.read(buffer)) != -1) {
+                        total += count;
+                        if (total > MAX_EXECUTABLE_BYTES * 2) throw new IOException("BotGuard archive exceeds its size limit");
+                        for (int i = 0; i < count; i++) if (buffer[i] != 0) throw new IOException("Unexpected data after BotGuard TAR end");
+                    }
+                    break;
+                }
+
+                // USTAR HEADER: NAME AT 0 (100 BYTES), SIZE AT 124, CHECKSUM AT 148 (SUMMED AS SPACES), TYPE FLAG AT 156
+                // AND NAME PREFIX AT 345; THE WANTED ENTRY MUST BE ONE NON-EMPTY REGULAR FILE WITHOUT A PREFIX
+                long checksum = 0;
+                for (int i = 0; i < header.length; i++) checksum += i >= 148 && i < 156 ? 32 : header[i] & 255;
+                if (checksum != octal(header, 148, 8)) throw new IOException("Invalid BotGuard TAR header checksum");
+                final long size = octal(header, 124, 12);
+                total += 512 + size;
+                if (size > MAX_EXECUTABLE_BYTES || total > MAX_EXECUTABLE_BYTES * 2) throw new IOException("BotGuard archive exceeds its size limit");
+                int end = 0;
+                while (end < 100 && header[end] != 0) end++;
+                final String file = new String(header, 0, end, StandardCharsets.UTF_8);
+                final boolean wanted = name.equals(file) || ("./" + name).equals(file);
+                if (wanted && (found || size == 0 || header[345] != 0 || (header[156] != 0 && header[156] != '0')))
+                    throw new IOException("Invalid or duplicate BotGuard TAR executable");
+                try (final var output = wanted ? Files.newOutputStream(executable) : OutputStream.nullOutputStream()) {
+                    long remaining = size;
+                    while (remaining > 0) {
+                        final int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+                        if (count < 0) throw new IOException("Truncated BotGuard TAR entry");
+                        output.write(buffer, 0, count);
+                        remaining -= count;
+                    }
+                }
+                input.skipNBytes((512 - size % 512) % 512);
+                found |= wanted;
+            }
+            if (!found) throw new IOException("BotGuard TAR does not contain " + name);
+        }
+    }
+
+    // ==========================================================================
+    // UTILITY
+    // ==========================================================================
+    // A TAR NUMERIC FIELD: OCTAL DIGITS PADDED WITH NULS OR SPACES ON EITHER SIDE, NEVER BETWEEN DIGITS
+    private static long octal(final byte[] data, final int offset, final int length) throws IOException {
+        long value = 0;
+        boolean ended = false;
+        for (int i = offset; i < offset + length; i++) {
+            final int c = data[i] & 255;
+            if (c == 0 || c == ' ') {
+                if (value != 0) ended = true;
+                continue;
+            }
+            if (ended || c < '0' || c > '7') throw new IOException("Invalid BotGuard TAR numeric field");
+            value = Math.addExact(Math.multiplyExact(value, 8), c - '0');
+        }
+        return value;
+    }
+}

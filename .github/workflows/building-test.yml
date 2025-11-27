@@ -1,0 +1,48 @@
+name: Build Test
+
+on:
+  push:
+    branches: ["main", "3.0.x"]
+  pull_request:
+    branches: ["main", "3.0.x"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: watermedia/binaries
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: WaterMediaTeam/watermedia-v3
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Read build versions
+        id: versions
+        shell: pwsh
+        run: |
+          $gradleVersion = ((Get-Content gradle.properties | Select-String '^gradle_version=').Line -split '=', 2)[1]
+          Add-Content $env:GITHUB_OUTPUT "gradle=$gradleVersion"
+
+      - name: Set up patched Java
+        shell: pwsh
+        run: ./tools/SetupJava.ps1 -Platform linux-x86_64
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: ${{ steps.versions.outputs.gradle }}
+
+      - name: Build and test
+        run: gradle build --warning-mode fail

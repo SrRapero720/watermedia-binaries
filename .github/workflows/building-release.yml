@@ -1,0 +1,62 @@
+name: Build for Release
+
+on:
+  push:
+    tags: ["*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: watermedia/binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [curseforge, modrinth]
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: WaterMediaTeam/watermedia-v3
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Read build versions
+        id: versions
+        shell: pwsh
+        run: |
+          $gradleVersion = ((Get-Content gradle.properties | Select-String '^gradle_version=').Line -split '=', 2)[1]
+          Add-Content $env:GITHUB_OUTPUT "gradle=$gradleVersion"
+
+      - name: Set up patched Java
+        shell: pwsh
+        run: ./tools/SetupJava.ps1 -Platform linux-x86_64
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
+        with:
+          gradle-version: ${{ steps.versions.outputs.gradle }}
+
+      - name: Build and test
+        run: gradle build --warning-mode fail
+
+      - name: Publish to CurseForge
+        if: ${{ matrix.platform == 'curseforge' }}
+        run: gradle publishCurseforge --warning-mode fail
+        env:
+          CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
+
+      - name: Publish to Modrinth
+        if: ${{ matrix.platform == 'modrinth' }}
+        run: gradle publishModrinth --warning-mode fail
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}

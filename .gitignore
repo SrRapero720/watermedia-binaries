@@ -1,0 +1,7 @@
+# Project exclude paths
+/.gradle
+/build
+/out/
+/config
+/.idea
+!/.idea/icon.svg

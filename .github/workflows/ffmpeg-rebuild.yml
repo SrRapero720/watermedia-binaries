@@ -1,0 +1,163 @@
+name: FFmpeg Rebuild
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Native platform to rebuild
+        type: choice
+        default: all
+        options:
+          - all
+          - linux-x86_64
+          - linux-arm64
+          - windows-x86_64
+          - macosx-x86_64
+          - macosx-arm64
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJSON(inputs.platform == 'all' && '["linux-x86_64","linux-arm64","windows-x86_64","macosx-x86_64","macosx-arm64"]' || format('["{0}"]', inputs.platform)) }}
+    runs-on: ${{ matrix.platform == 'linux-x86_64' && 'ubuntu-22.04' || matrix.platform == 'linux-arm64' && 'ubuntu-22.04-arm' || matrix.platform == 'windows-x86_64' && 'windows-2022' || matrix.platform == 'macosx-x86_64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 360
+    steps:
+      - name: Checkout native packaging sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up patched Java
+        shell: pwsh
+        run: ./tools/SetupJava.ps1 -Platform '${{ matrix.platform }}'
+
+      # ONLY THE ARM64 RECIPE ENABLES libudev (v4l2-request); FFMPEG'S CONFIGURE WOULD AUTODETECT IT ON X64 AND MAKE libavutil REQUIRE IT
+      - name: Install Linux build prerequisites
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf autoconf-archive automake libtool pkg-config nasm ninja-build ragel unzip zip xz-utils libva-dev libdrm-dev libasound2-dev libpulse-dev libxcb1-dev libx11-dev ${{ matrix.platform == 'linux-arm64' && 'libudev-dev' || '' }}
+
+      - name: Install macOS build prerequisites
+        if: runner.os == 'macOS'
+        run: |
+          brew install autoconf autoconf-archive automake libtool pkgconf nasm ninja meson ragel gcc@13
+          echo "GCC_LIBRARY_PATH=$(brew --prefix gcc@13)/lib/gcc/13" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=$(brew --prefix gcc@13)/lib/gcc/13" >> "$GITHUB_ENV"
+          echo "DYLD_LIBRARY_PATH=$(brew --prefix gcc@13)/lib/gcc/13" >> "$GITHUB_ENV"
+
+      - name: Install Windows build prerequisites
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & C:/msys64/usr/bin/bash.exe -lc 'pacman -Syu --noconfirm'
+          & C:/msys64/usr/bin/bash.exe -lc 'pacman -Syu --noconfirm'
+          & C:/msys64/usr/bin/bash.exe -lc 'pacman -S --needed --noconfirm base-devel git unzip zip autoconf autoconf-archive automake libtool make patch diffutils mingw-w64-x86_64-gcc mingw-w64-x86_64-ninja mingw-w64-x86_64-pkgconf mingw-w64-x86_64-libtool mingw-w64-x86_64-meson mingw-w64-x86_64-nasm mingw-w64-x86_64-SDL2 mingw-w64-x86_64-ragel'
+          if ($LASTEXITCODE -ne 0) { throw 'MSYS2 prerequisites failed' }
+          Add-Content $env:GITHUB_PATH 'C:/msys64/usr/bin'
+          Add-Content $env:GITHUB_PATH 'C:/msys64/mingw64/bin'
+          Add-Content $env:GITHUB_ENV 'MSYSTEM=MINGW64'
+          Add-Content $env:GITHUB_ENV 'MSYS2_PATH_TYPE=inherit'
+
+      - name: Install verified Maven, CMake and Meson
+        shell: pwsh
+        run: ./tools/SetupNativeTools.ps1 -Platform '${{ matrix.platform }}'
+
+      - name: Prepare the Raspberry Pi userland
+        if: matrix.platform == 'linux-arm64'
+        shell: pwsh
+        run: ./tools/SetupLinuxNative.ps1
+
+      - name: Rebuild and verify native classifier
+        shell: pwsh
+        run: ./tools/RebuildFFmpeg.ps1 -Platform '${{ matrix.platform }}'
+
+      - name: Upload verified candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ffmpeg-${{ matrix.platform }}
+          path: build/rebuilt/${{ matrix.platform }}
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Preserve unverified build diagnostics
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: unverified-ffmpeg-${{ matrix.platform }}
+          path: |
+            build/nr/*/ffmpeg/target/ffmpeg*${{ matrix.platform }}*.jar
+            build/nr/*/ffmpeg/cppbuild/${{ matrix.platform }}*/bin/ffmpeg*
+            build/nr/*/ffmpeg/cppbuild/${{ matrix.platform }}*/ffmpeg-*/ffbuild/config.log
+            build/nr/*/ffmpeg/cppbuild/${{ matrix.platform }}*/libxml2-*/config.log
+            build/nr/*/ffmpeg/cppbuild.sh
+            build/nr/*/pom.xml
+            build/nr/smoke-*/*.mpd
+            build/nr/smoke-*/*.m4s
+          if-no-files-found: ignore
+          compression-level: 0
+
+  repack:
+    if: ${{ success() && inputs.platform == 'all' }}
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout native packaging sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+
+      - name: Set up patched Java
+        shell: pwsh
+        run: ./tools/SetupJava.ps1 -Platform linux-x86_64
+
+      - name: Download Linux x64 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ffmpeg-linux-x86_64
+          path: build/rebuilt/linux-x86_64
+          digest-mismatch: error
+
+      - name: Download Linux ARM64 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ffmpeg-linux-arm64
+          path: build/rebuilt/linux-arm64
+          digest-mismatch: error
+
+      - name: Download Windows x64 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ffmpeg-windows-x86_64
+          path: build/rebuilt/windows-x86_64
+          digest-mismatch: error
+
+      - name: Download macOS x64 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ffmpeg-macosx-x86_64
+          path: build/rebuilt/macosx-x86_64
+          digest-mismatch: error
+
+      - name: Download macOS ARM64 candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: ffmpeg-macosx-arm64
+          path: build/rebuilt/macosx-arm64
+          digest-mismatch: error
+
+      - name: Repack verified native set
+        shell: pwsh
+        run: java tools/RepackFFmpeg.java . build/rebuilt
+
+      - name: Upload verified native archives
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ffmpeg-native
+          path: |
+            src/main/resources/libs/ffmpeg-*.zip
+            libs/ffmpeg-*.jar
+            tools/ffmpeg-manifest.properties
+          if-no-files-found: error
+          compression-level: 0

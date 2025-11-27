@@ -1,0 +1,37 @@
+modLoader="javafml"
+loaderVersion="$neofmlrange"
+issueTrackerURL="https://github.com/$github/issues"
+license="$license"
+logoFile="pack.png"
+
+[[mods]]
+    modId="$id"
+    version="$version"
+    displayName="$libname"
+    updateJSONURL="https://neoforge.curseupdate.com/$curseforgeid/$id"
+    displayURL="https://www.curseforge.com/minecraft/mc-mods/$slug"
+    credits="$credits"
+    authors="$authors"
+    logoFile="pack.png"
+    description='''$description'''
+
+[[dependencies.$id]]
+    modId="neoforge"
+    type="required"
+    versionRange="$neorange"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.$id]]
+    modId="minecraft"
+    type="required"
+    versionRange="$minecraftrange"
+    ordering="NONE"
+    side="BOTH"
+
+[[dependencies.$id]]
+    modId="watermedia"
+    type="required"
+    versionRange="$watermediarange"
+    ordering="NONE"
+    side="CLIENT"
