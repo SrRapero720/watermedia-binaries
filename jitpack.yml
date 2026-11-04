@@ -1,0 +1,8 @@
+# JITPACK CLONES THIS REPOSITORY ALONE, BUT IT ONLY BUILDS AS THE binaries FOLDER OF A WATERMEDIA CHECKOUT
+jdk:
+  - openjdk25
+# A CUSTOM COMMAND ALSO KEEPS JITPACK FROM OVERRIDING THE VERSION, SO THE JAR DECLARES THE ONE OF gradle.properties
+install:
+  - rm -rf /tmp/watermedia && git clone --depth 1 --branch master https://github.com/SrRapero720/watermedia.git /tmp/watermedia
+  - rm -rf /tmp/watermedia/binaries && cp -a . /tmp/watermedia/binaries
+  - cd /tmp/watermedia/binaries && ./gradlew publishToMavenLocal

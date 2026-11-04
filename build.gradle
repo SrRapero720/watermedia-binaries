@@ -2,6 +2,7 @@ import org.gradle.api.attributes.Usage
 
 plugins {
     id 'java'
+    id 'maven-publish'
     id 'com.gradleup.shadow'
     id 'me.modmuss50.mod-publish-plugin'
 }
@@ -61,6 +62,16 @@ shadowJar {
 }
 
 check.dependsOn tasks.named('compileToolsJava')
+
+// JITPACK SERVES THIS PUBLICATION UNDER THE REPOSITORY NAME, WHICH IS ALSO THE MOD SLUG
+publishing {
+    publications {
+        binaries(MavenPublication) {
+            artifactId = slug
+            artifact shadowJar
+        }
+    }
+}
 
 publishMods {
     file = shadowJar.archiveFile

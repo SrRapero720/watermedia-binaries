@@ -22,7 +22,8 @@ jobs:
       - name: Checkout WaterMedia provider
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          repository: WaterMediaTeam/watermedia-v3
+          repository: SrRapero720/watermedia
+          ref: master
           path: watermedia
 
       - name: Checkout Binaries revision
