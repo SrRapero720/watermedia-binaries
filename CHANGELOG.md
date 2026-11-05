@@ -1,3 +1,7 @@
+# 📦 UPDATE 3.0.1
+- 🛠️ Reworked bootstrap internals
+- 🐛 Fixed JitPack builds failing to find WATERMeDIA
+
 # 📦 RELEASE 3.0.0
 - ⚙️ Native libraries load only through WATERMeDIA and never unload
 - ⚙️ Required by WATERMeDIA on Minecraft clients, optional on dedicated servers
