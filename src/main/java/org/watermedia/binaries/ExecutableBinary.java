@@ -32,9 +32,6 @@ abstract sealed class ExecutableBinary permits YtDlpBinary, BotGuardBinary {
         this.override = override;
     }
 
-    // ==========================================================================
-    // PUBLIC API
-    // ==========================================================================
     /** Resolves a verified executable, installing a release only after its checksum matches. */
     public final synchronized Path executable() throws IOException {
         final Path directory = WaterMediaBinaries.binaryDir(this.id);

@@ -28,9 +28,6 @@ public final class BotGuardBinary extends ExecutableBinary {
         }, "watermedia.botguard.binary");
     }
 
-    // ==========================================================================
-    // PUBLIC API
-    // ==========================================================================
     /** Returns the snapshot cache belonging to the verified executable installation. */
     public Path snapshot() throws IOException {
         final String hash = IOTool.sha256(this.executable());
