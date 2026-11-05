@@ -1,22 +1,30 @@
 name: Build for Release
 
+# A TAG BUILDS ONCE, PUBLISHES THE GITHUB RELEASE, THEN EACH STORE UPLOADS THAT JAR AND SYNCS ITS DESCRIPTION WITH
+# README.md, SO A STORE THAT FAILS NEVER HOLDS THE OTHER BACK. RUN BY HAND, IT ONLY SYNCS THE DESCRIPTIONS
 on:
   push:
     tags: ["*"]
+  workflow_dispatch:
+    inputs:
+      store:
+        description: Store whose description takes the README of the selected branch or tag
+        type: choice
+        options: [all, curseforge, modrinth]
+        default: all
 
 permissions:
   contents: read
 
+# EVERY JOB BUILDS BINARIES INSIDE THE CORE MASTER CHECKOUT, AS ITS binaries FOLDER
+defaults:
+  run:
+    working-directory: watermedia/binaries
+
 jobs:
   build:
+    if: ${{ github.event_name == 'push' }}
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: watermedia/binaries
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [curseforge, modrinth]
 
     steps:
       - name: Checkout WaterMedia provider
@@ -31,33 +39,175 @@ jobs:
         with:
           path: watermedia/binaries
 
-      - name: Read build versions
-        id: versions
+      # A TAG PUSHED WITHOUT ITS BUMP WOULD PUBLISH THE PREVIOUS VERSION AGAIN
+      - name: Check the tag is the version
         shell: pwsh
         run: |
-          $gradleVersion = ((Get-Content gradle.properties | Select-String '^gradle_version=').Line -split '=', 2)[1]
-          Add-Content $env:GITHUB_OUTPUT "gradle=$gradleVersion"
+          $version = ((Get-Content gradle.properties | Select-String '^version=').Line -split '=', 2)[1]
+          if ($version -ne $env:GITHUB_REF_NAME) { throw "Tag $env:GITHUB_REF_NAME is not the version $version" }
 
-      - name: Set up patched Java
-        shell: pwsh
-        run: ./tools/SetupJava.ps1 -Platform linux-x86_64
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb
-        with:
-          gradle-version: ${{ steps.versions.outputs.gradle }}
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
 
       - name: Build and test
         run: gradle build --warning-mode fail
 
-      - name: Publish to CurseForge
-        if: ${{ matrix.platform == 'curseforge' }}
-        run: gradle publishCurseforge --warning-mode fail
+      - name: Keep the release files
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: libs
+          path: watermedia/binaries/build/libs
+          if-no-files-found: error
+          compression-level: 0
+
+  # THE PUBLISH JOBS TAKE THE BUILT JAR, SO -x KEEPS GRADLE FROM PACKAGING IT AGAIN
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SrRapero720/watermedia
+          ref: master
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
+
+      - name: Take the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: libs
+          path: watermedia/binaries/build/libs
+          digest-mismatch: error
+
+      - name: Publish the GitHub release
+        run: gradle publishGithub -x shadowJar --warning-mode fail
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  curseforge:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SrRapero720/watermedia
+          ref: master
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
+
+      - name: Take the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: libs
+          path: watermedia/binaries/build/libs
+          digest-mismatch: error
+
+      - name: Upload to CurseForge
+        run: gradle publishCurseforge -x shadowJar --warning-mode fail
         env:
           CURSEFORGE_TOKEN: ${{ secrets.CURSEFORGE_TOKEN }}
 
-      - name: Publish to Modrinth
-        if: ${{ matrix.platform == 'modrinth' }}
-        run: gradle publishModrinth --warning-mode fail
+  modrinth:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SrRapero720/watermedia
+          ref: master
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
+
+      - name: Take the release files
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          name: libs
+          path: watermedia/binaries/build/libs
+          digest-mismatch: error
+
+      - name: Upload to Modrinth
+        run: gradle publishModrinth -x shadowJar --warning-mode fail
+        env:
+          MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
+
+  # A TAG SYNCS AFTER ITS OWN STORE'S UPLOAD; A MANUAL RUN SKIPS THE UPLOADS AND SYNCS THE STORES IT NAMES
+  curseforge-description:
+    needs: curseforge
+    if: ${{ !cancelled() && (needs.curseforge.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.store != 'modrinth')) }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SrRapero720/watermedia
+          ref: master
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
+
+      - name: Sync the CurseForge description
+        run: gradle syncCurseforgeDescription --warning-mode fail
+        env:
+          CURSEFORGE_SESSION: ${{ secrets.CURSEFORGE_SESSION }}
+
+  modrinth-description:
+    needs: modrinth
+    if: ${{ !cancelled() && (needs.modrinth.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.store != 'curseforge')) }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout WaterMedia provider
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: SrRapero720/watermedia
+          ref: master
+          path: watermedia
+
+      - name: Checkout Binaries revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: watermedia/binaries
+
+      - name: Set up the build
+        uses: ./watermedia/binaries/.github/actions/setup-build
+
+      - name: Sync the Modrinth description
+        run: gradle syncModrinthDescription --warning-mode fail
         env:
           MODRINTH_TOKEN: ${{ secrets.MODRINTH_TOKEN }}
