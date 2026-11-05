@@ -19,20 +19,17 @@ public final class WaterMediaBinaries extends WaterMediaModule {
     public static final Logger LOGGER = WaterMedia.logger(ID);
     private static volatile Map<String, Path> paths = Map.of();
 
-    public WaterMediaBinaries(final WaterMedia watermedia) { super(watermedia); }
-
     // ==========================================================================
     // PUBLIC API
     // ==========================================================================
     @Override
-    public void start() throws IOException {
+    public void start(final String name, final Path tmp, final Path cwd, final boolean clientSide) throws IOException {
         // A DEDICATED SERVER PLAYS NOTHING, SO IT NEVER PROVISIONS THE NATIVES
-        if (!this.watermedia.clientSide) return;
-        final Path root = this.watermedia.tmp;
-        paths = Map.of(YTDLP_ID, root.resolve(YTDLP_ID), BOTGUARD_ID, root.resolve(BOTGUARD_ID));
+        if (!clientSide) return;
+        paths = Map.of(YTDLP_ID, tmp.resolve(YTDLP_ID), BOTGUARD_ID, tmp.resolve(BOTGUARD_ID));
         if (WaterMediaConfig.codecs.ffmpeg.disable) return;
-        final Path installed = FFmpegBinaries.start(root.resolve(FFMPEG_ID));
-        paths = Map.of(FFMPEG_ID, installed, YTDLP_ID, root.resolve(YTDLP_ID), BOTGUARD_ID, root.resolve(BOTGUARD_ID));
+        final Path installed = FFmpegBinaries.start(tmp.resolve(FFMPEG_ID));
+        paths = Map.of(FFMPEG_ID, installed, YTDLP_ID, tmp.resolve(YTDLP_ID), BOTGUARD_ID, tmp.resolve(BOTGUARD_ID));
     }
 
     /** Returns a registered cache or provisioned native directory. */
