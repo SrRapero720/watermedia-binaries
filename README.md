@@ -6,11 +6,14 @@ YouTube, SoundCloud, Facebook and Instagram. Nothing to compile or install, just
 - Required on Minecraft clients, optional on dedicated servers
 - Use it with the same WATERMeDIA version (3.0 with 3.0)
 
-<table width="100%" style="width: 100%">
-  <tr><th>Architecture</th><th align="center">Windows</th><th align="center">Linux</th><th align="center">macOS</th><th align="center">Android</th></tr>
-  <tr><td>x86_64</td><td align="center">✅</td><td align="center">✅</td><td align="center">✅</td><td align="center">⛔</td></tr>
-  <tr><td>aarch64</td><td align="center">⛔</td><td align="center">✅</td><td align="center">✅</td><td align="center">⛔</td></tr>
-</table>
+<p align="center" style="text-align: center;">
+<img src="https://raw.githubusercontent.com/SrRapero720/watermedia-binaries/master/docs/assets/windows64.png" width="64" height="64" alt="Windows x64" title="Windows x64">
+<img src="https://raw.githubusercontent.com/SrRapero720/watermedia-binaries/master/docs/assets/linux64.png" width="64" height="64" alt="Linux x64" title="Linux x64">
+<img src="https://raw.githubusercontent.com/SrRapero720/watermedia-binaries/master/docs/assets/mac64.png" width="64" height="64" alt="macOS Intel" title="macOS Intel">
+<img src="https://raw.githubusercontent.com/SrRapero720/watermedia-binaries/master/docs/assets/macarm.png" width="64" height="64" alt="macOS Apple Silicon" title="macOS Apple Silicon">
+</p>
+
+Linux runs on ARM64 too. Windows on ARM and Android aren't supported.
 
 <h1 style="color: #EB622B;"><strong>⚖️ LICENSE</strong></h1>
 
