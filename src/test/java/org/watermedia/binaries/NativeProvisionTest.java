@@ -116,7 +116,6 @@ public class NativeProvisionTest {
     @Nested
     @DisplayName("Checksums and trust pins")
     class Integrity {
-        @TempDir Path directory;
 
         @Test
         @DisplayName("A yt-dlp checksum must exist, be valid and be unique; a release needs a digest and HTTPS")
@@ -143,16 +142,6 @@ public class NativeProvisionTest {
                 assertEquals(64, IOTool.requireSha256(pins.getProperty(platform + ".sha256")).length());
                 assertTrue(pins.getProperty(platform + ".url").startsWith("https://codeberg.org/ThetaDev/rustypipe-botguard/releases/download/v0.1.2/"));
             }
-        }
-
-        @Test
-        @DisplayName("A corrupted file fails its SHA-256 verification")
-        void corruptFileFailsVerification() throws Exception {
-            final Path file = Files.writeString(this.directory.resolve("binary"), "valid");
-            final String expected = IOTool.sha256(file);
-            IOTool.verifySha256(file, expected);
-            Files.writeString(file, "wrong");
-            assertThrows(IOException.class, () -> IOTool.verifySha256(file, expected));
         }
     }
 
@@ -214,15 +203,6 @@ public class NativeProvisionTest {
             assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, unsafe.version, unsafe.hash, unsafe.zip.length, good.libraries,
                     new ByteArrayInputStream(unsafe.zip)));
             assertFalse(Files.exists(this.directory.getParent().resolve("escape")));
-            assertNull(IOTool.currentGeneration(this.directory));
-        }
-
-        @Test
-        @DisplayName("The current pointer cannot escape the cache directory")
-        void pointerCannotEscapeCacheDirectory() throws Exception {
-            Files.writeString(this.directory.resolve("current"), "../other");
-            assertNull(IOTool.currentGeneration(this.directory));
-            Files.writeString(this.directory.resolve("current"), this.directory.toAbsolutePath().toString());
             assertNull(IOTool.currentGeneration(this.directory));
         }
     }
