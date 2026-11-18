@@ -40,11 +40,15 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Verifies the native provisioning of Binaries: checksums and trust pins, FFmpeg generations, BotGuard archives and the executable cache. */
+/**
+ * Verifies the native provisioning of Binaries: yt-dlp checksums and the BotGuard trust pins, FFmpeg generations that
+ * repair, replace and fail closed, BotGuard archive extraction, and the executables' override gate, extraction dispatch
+ * and offline cache.
+ */
 @DisplayName("Native provisioning")
 public class NativeProvisionTest {
     // ==========================================================================
-    // FIXTURES
+    // UTILITY
     // ==========================================================================
     // PUBLISHES A VERIFIED INSTALLATION RECORD FOR release AS THE CURRENT GENERATION OF directory
     private static Path cachedExecutable(final Path directory, final String name, final ExecutableBinary.Release release) throws Exception {
@@ -87,7 +91,7 @@ public class NativeProvisionTest {
     }
 
     private static Path install(final Path directory, final Fixture fixture) throws IOException {
-        return FFmpegBinaries.install(directory, fixture.version, fixture.hash, fixture.zip.length, fixture.libraries, new ByteArrayInputStream(fixture.zip));
+        return FFmpegBinaries.install(directory, fixture.version(), fixture.hash(), fixture.zip().length, fixture.libraries(), new ByteArrayInputStream(fixture.zip()));
     }
 
     // AN FFmpeg ARCHIVE WITH files PLUS ITS version.cfg, THE ARCHIVE DIGEST AND ONE DIGEST PER LIBRARY
@@ -116,7 +120,6 @@ public class NativeProvisionTest {
     @Nested
     @DisplayName("Checksums and trust pins")
     class Integrity {
-
         @Test
         @DisplayName("A yt-dlp checksum must exist, be valid and be unique; a release needs a digest and HTTPS")
         void checksumMustExistBeValidAndUnique() throws Exception {
@@ -134,7 +137,7 @@ public class NativeProvisionTest {
         void trustPinsCoverOnlyReviewedRelease() throws Exception {
             final var pins = new Properties();
             try (final var input = this.getClass().getResourceAsStream("/META-INF/botguard-pins.properties")) {
-                assertNotNull(input);
+                assertNotNull(input, "the BotGuard trust pins are bundled");
                 pins.load(input);
             }
             assertEquals("v0.1.2", pins.getProperty("version"));
@@ -185,7 +188,7 @@ public class NativeProvisionTest {
             final InputStream failing = new InputStream() {
                 @Override public int read() throws IOException { throw new IOException("Interrupted"); }
             };
-            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, next.version, next.hash, next.zip.length, next.libraries, failing));
+            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, next.version(), next.hash(), next.zip().length, next.libraries(), failing));
             assertEquals(previous, IOTool.currentGeneration(this.directory));
             try (final var files = Files.list(this.directory)) {
                 assertEquals(1, files.filter(Files::isDirectory).count());
@@ -197,12 +200,13 @@ public class NativeProvisionTest {
         @DisplayName("A wrong archive digest or an unexpected entry path fails closed")
         void archiveDigestAndUnexpectedPathsFailClosed() throws Exception {
             final var good = fixture("v1", Map.of("native.dll", "native"));
-            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, good.version, "0".repeat(64), good.zip.length, good.libraries,
-                    new ByteArrayInputStream(good.zip)));
+            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, good.version(), "0".repeat(64), good.zip().length, good.libraries(),
+                    new ByteArrayInputStream(good.zip())));
+            // A VERIFIED ARCHIVE WHOSE ENTRY CLIMBS OUT OF ITS STAGE (directory/install-*) INTO directory ITSELF
             final var unsafe = fixture("v1", Map.of("../escape", "bad"));
-            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, unsafe.version, unsafe.hash, unsafe.zip.length, good.libraries,
-                    new ByteArrayInputStream(unsafe.zip)));
-            assertFalse(Files.exists(this.directory.getParent().resolve("escape")));
+            assertThrows(IOException.class, () -> FFmpegBinaries.install(this.directory, unsafe.version(), unsafe.hash(), unsafe.zip().length, good.libraries(),
+                    new ByteArrayInputStream(unsafe.zip())));
+            assertFalse(Files.exists(this.directory.resolve("escape")), "the entry escaped its stage");
             assertNull(IOTool.currentGeneration(this.directory));
         }
     }
@@ -254,7 +258,9 @@ public class NativeProvisionTest {
             final String previous = System.getProperty(property);
             try {
                 System.setProperty(property, Files.writeString(this.directory.resolve("override"), "host").toString());
-                assertThrows(IOException.class, () -> new YtDlpBinary().executable());
+                // NO WaterMedia LOAD IN THIS JVM, SO BINARIES PUBLISHED NO CACHE DIRECTORY
+                final IOException failure = assertThrows(IOException.class, () -> new YtDlpBinary().executable());
+                assertEquals("WaterMedia Binaries is not initialized: " + WaterMediaBinaries.YTDLP_ID, failure.getMessage());
             } finally {
                 if (previous == null) System.clearProperty(property);
                 else System.setProperty(property, previous);
@@ -266,8 +272,8 @@ public class NativeProvisionTest {
         void executableExtractionDispatchesByBinaryType() throws Exception {
             final ExecutableBinary ytdlp = new YtDlpBinary();
             final ExecutableBinary botguard = new BotGuardBinary();
-            assertNotNull(ytdlp.name);
-            assertNotNull(botguard.name);
+            assertNotNull(ytdlp.name, "yt-dlp ships for " + IOTool.platform());
+            assertNotNull(botguard.name, "BotGuard ships for " + IOTool.platform());
 
             final Path ytdlpArchive = Files.writeString(this.directory.resolve("yt-dlp-download"), "direct executable");
             final Path ytdlpExecutable = this.directory.resolve(ytdlp.name);
@@ -288,7 +294,8 @@ public class NativeProvisionTest {
             final Path botguardExecutable = this.directory.resolve(botguard.name);
             botguard.extract(botguardArchive, botguardExecutable);
             assertEquals("verified", Files.readString(botguardExecutable));
-            assertTrue(Files.isRegularFile(botguardArchive));
+            // THE DEFAULT extract MOVES THE DOWNLOAD; BOTGUARD UNPACKS IT AND LEAVES THE ARCHIVE TO ITS STAGE
+            assertTrue(Files.isRegularFile(botguardArchive), "the BotGuard archive stays");
         }
 
         @Test
@@ -296,8 +303,8 @@ public class NativeProvisionTest {
         void executableCacheUsesPinnedReleaseAndSurvivesOfflineLookup() throws Exception {
             final YtDlpBinary ytdlp = new YtDlpBinary();
             final BotGuardBinary botguard = new BotGuardBinary();
-            assertNotNull(ytdlp.name);
-            assertNotNull(botguard.name);
+            assertNotNull(ytdlp.name, "yt-dlp ships for " + IOTool.platform());
+            assertNotNull(botguard.name, "BotGuard ships for " + IOTool.platform());
             final Path ytdlpDir = Files.createDirectory(this.directory.resolve("yt-dlp"));
             final Path botguardDir = Files.createDirectory(this.directory.resolve("botguard"));
             final Path ytdlpFile = cachedExecutable(ytdlpDir, ytdlp.name,
@@ -314,9 +321,7 @@ public class NativeProvisionTest {
                 paths.set(null, Map.of(WaterMediaBinaries.YTDLP_ID, ytdlpDir, WaterMediaBinaries.BOTGUARD_ID, botguardDir));
                 System.clearProperty("watermedia.ytdlp.binary");
                 System.clearProperty("watermedia.botguard.binary");
-                assertEquals(botguardFile, botguard.executable());
-                assertEquals(botguardFile, botguard.executable());
-
+                // EVERY CONNECTION FAILS, AS ON A HOST WITHOUT NETWORK, AND IS COUNTED
                 ProxySelector.setDefault(new ProxySelector() {
                     @Override public List<Proxy> select(final URI uri) {
                         lookups.incrementAndGet();
@@ -324,8 +329,13 @@ public class NativeProvisionTest {
                     }
                     @Override public void connectFailed(final URI uri, final SocketAddress address, final IOException failure) {}
                 });
+                // BOTGUARD'S RELEASE IS PINNED IN ITS OWN JAR, SO ITS CACHE MATCHES WITHOUT ANY LOOKUP
+                assertEquals(botguardFile, botguard.executable());
+                assertEquals(botguardFile, botguard.executable());
+                assertEquals(0, lookups.get(), "BotGuard looked its release up");
+                // YT-DLP ASKS GITHUB FOR ITS LATEST RELEASE; THE FAILED LOOKUP KEEPS THE VERIFIED CACHE
                 assertEquals(ytdlpFile, ytdlp.executable());
-                assertTrue(lookups.get() > 0);
+                assertTrue(lookups.get() > 0, "the yt-dlp release lookup was attempted");
                 assertEquals(ytdlpFile, ytdlp.executable());
                 assertEquals(ytdlpFile.getParent(), IOTool.currentGeneration(ytdlpDir));
                 assertEquals(botguardFile.getParent(), IOTool.currentGeneration(botguardDir));

@@ -25,13 +25,19 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** Verifies that {@code tools/RepackFFmpeg.java}, run in a clean JVM, repacks only fully verified candidates and leaves the installed archives and manifest alone otherwise. */
+/**
+ * Verifies that {@code tools/RepackFFmpeg.java}, run in a clean JVM, repacks LGPL and custom GPL candidates into
+ * complete archives and a manifest, and that a wrong argument count, record, archive name, component, provenance or
+ * variant leaves the installed archives and manifest alone.
+ */
 @DisplayName("RepackFFmpeg")
 public class RepackToolTest {
     private static final String[] ARCHIVES = { "linux", "linux-arm64", "macos", "macos-arm64", "windows" };
+    private static final long TOOL_TIMEOUT_MS = 20_000L;
+    private static final long KILL_TIMEOUT_MS = 5_000L;
 
     // ==========================================================================
-    // FIXTURES
+    // UTILITY
     // ==========================================================================
     // ONE VERIFIED CANDIDATE PER PLATFORM UNDER directory/candidates, THE INSTALLED ARCHIVES WRITTEN AS "existing <archive>";
     // invalidFinal BREAKS THE LAST VERIFICATION RECORD, missingLinuxJni DROPS libjniavcodec FROM LINUX, gpl SWITCHES THE BUILD
@@ -39,7 +45,6 @@ public class RepackToolTest {
         Files.copy(Path.of("gradle.properties"), directory.resolve("gradle.properties"));
         final Properties properties = new Properties();
         try (final var input = Files.newInputStream(directory.resolve("gradle.properties"))) { properties.load(input); }
-        properties.putIfAbsent("ffmpeg_headers_patch_sha256", "2".repeat(64));
         if (gpl) {
             properties.setProperty("ffmpeg_version", "9.0-custom-1.5.14");
             properties.setProperty("ffmpeg_variant", "gpl");
@@ -106,9 +111,33 @@ public class RepackToolTest {
         return candidates;
     }
 
-    // THE java LAUNCHER OF THE TEST JVM, SO THE TOOL RUNS IN A CLEAN JVM OF THE SAME RELEASE
-    private static String java() {
-        return Path.of(System.getProperty("java.home"), "bin", IOTool.platform().startsWith("windows-") ? "java.exe" : "java").toString();
+    // RUNS THE TOOL ON root WITH THE GIVEN CANDIDATE DIRECTORIES IN A CLEAN JVM OF THE TEST'S RELEASE; A HUNG TOOL DIES AND FAILS
+    private static Run repack(final Path root, final Path... candidates) throws Exception {
+        final String java = Path.of(System.getProperty("java.home"), "bin", IOTool.platform().startsWith("windows-") ? "java.exe" : "java").toString();
+        final List<String> command = new ArrayList<>(List.of(java, Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), root.toString()));
+        for (final Path candidate: candidates) command.add(candidate.toString());
+        final Path log = root.resolve("process.log");
+        final Process process = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
+        final boolean exited;
+        try {
+            exited = process.waitFor(TOOL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } finally {
+            if (process.isAlive()) process.destroyForcibly().waitFor(KILL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }
+        final String output = new String(Files.readAllBytes(log), StandardCharsets.UTF_8);
+        assertTrue(exited, "RepackFFmpeg did not finish in " + TOOL_TIMEOUT_MS + " ms:\n" + output);
+        return new Run(process.exitValue(), output);
+    }
+
+    private static Properties load(final Path file) throws Exception {
+        final Properties properties = new Properties();
+        try (final var input = Files.newInputStream(file)) { properties.load(input); }
+        return properties;
+    }
+
+    private static void assertInstalledArchivesKept(final Path root) throws Exception {
+        for (final String archive: ARCHIVES)
+            assertEquals("existing " + archive, Files.readString(root.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip")), archive + " was replaced");
     }
 
     // ==========================================================================
@@ -122,64 +151,47 @@ public class RepackToolTest {
         @Test
         @DisplayName("LGPL candidates produce a complete manifest and version markers")
         void lgplCandidatesProduceCompleteManifestAndMarkers() throws Exception {
-            final Path candidates = candidates(this.directory, false, false, false);
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertEquals(0, process.exitValue(), Files.readString(output));
-                final Properties manifest = new Properties();
-                try (final var input = Files.newInputStream(this.directory.resolve("tools/ffmpeg-manifest.properties"))) { manifest.load(input); }
-                assertEquals("lgpl", manifest.getProperty("variant"));
-                assertEquals("LGPL-3.0-or-later", manifest.getProperty("license"));
-                assertEquals("rebuilt", manifest.getProperty("source.kind"));
-                // THE JAVA WRAPPERS OF THE FIRST VERIFIED PLATFORM SHIP NEXT TO THE CORE'S DEPENDENCY, THEIR HASH IN THE MANIFEST
-                assertEquals("wrapper of linux-x86_64", Files.readString(this.directory.resolve("libs/ffmpeg-" + manifest.getProperty("version") + ".jar")));
-                assertEquals(manifest.getProperty("linux.wrapper.sha256"), manifest.getProperty("wrapper.sha256"));
-                assertEquals("SrRapero720/javacpp-presets", manifest.getProperty("source.repository"));
-                for (final String archive: ARCHIVES) {
-                    assertEquals(64, manifest.getProperty(archive + ".wrapper.sha256").length());
-                    assertFalse(manifest.getProperty(archive + ".source").contains("-gpl"));
-                    try (final var zip = new ZipFile(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip").toFile())) {
-                        final var entries = zip.stream().toList();
-                        assertEquals("version.cfg", entries.get(entries.size() - 1).getName());
-                        try (final var input = zip.getInputStream(entries.get(entries.size() - 1))) {
-                            assertEquals(manifest.getProperty("version"), new String(input.readAllBytes(), StandardCharsets.UTF_8));
-                        }
+            final Run run = repack(this.directory, candidates(this.directory, false, false, false));
+            assertEquals(0, run.exit(), run.log());
+            final Properties manifest = load(this.directory.resolve("tools/ffmpeg-manifest.properties"));
+            assertEquals("lgpl", manifest.getProperty("variant"));
+            assertEquals("LGPL-3.0-or-later", manifest.getProperty("license"));
+            assertEquals("rebuilt", manifest.getProperty("source.kind"));
+            // THE JAVA WRAPPERS OF THE FIRST VERIFIED PLATFORM SHIP NEXT TO THE CORE'S DEPENDENCY, THEIR HASH IN THE MANIFEST
+            assertEquals("wrapper of linux-x86_64", Files.readString(this.directory.resolve("libs/ffmpeg-" + manifest.getProperty("version") + ".jar")));
+            assertEquals(manifest.getProperty("linux.wrapper.sha256"), manifest.getProperty("wrapper.sha256"));
+            assertEquals(load(Path.of("gradle.properties")).getProperty("ffmpeg_source_repository"), manifest.getProperty("source.repository"));
+            for (final String archive: ARCHIVES) {
+                assertEquals(64, manifest.getProperty(archive + ".wrapper.sha256").length(), archive + " wrapper digest");
+                assertFalse(manifest.getProperty(archive + ".source").contains("-gpl"), manifest.getProperty(archive + ".source"));
+                try (final var zip = new ZipFile(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip").toFile())) {
+                    // THE MARKER IS THE LAST ENTRY, SO AN INTERRUPTED EXTRACTION NEVER LOOKS COMPLETE
+                    final var entries = zip.stream().toList();
+                    assertEquals("version.cfg", entries.get(entries.size() - 1).getName(), archive + " ends with its marker");
+                    try (final var input = zip.getInputStream(entries.get(entries.size() - 1))) {
+                        assertEquals(manifest.getProperty("version"), new String(input.readAllBytes(), StandardCharsets.UTF_8));
                     }
                 }
-            } finally {
-                process.destroyForcibly();
             }
         }
 
         @Test
         @DisplayName("Custom GPL candidates keep their declared version and variant")
         void customGplCandidatesKeepTheirDeclaredVersionAndVariant() throws Exception {
-            final Path candidates = candidates(this.directory, false, false, true);
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(),
-                    this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertEquals(0, process.exitValue(), Files.readString(output));
-                final Properties manifest = new Properties();
-                try (final var input = Files.newInputStream(this.directory.resolve("tools/ffmpeg-manifest.properties"))) { manifest.load(input); }
-                assertEquals("9.0-custom-1.5.14", manifest.getProperty("version"));
-                assertEquals("gpl", manifest.getProperty("variant"));
-                assertEquals("GPL-3.0-or-later", manifest.getProperty("license"));
-                for (final String archive: ARCHIVES) {
-                    try (final var zip = new ZipFile(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip").toFile())) {
-                        assertEquals(15, zip.size());
-                        try (final var input = zip.getInputStream(zip.getEntry("version.cfg"))) {
-                            assertEquals("9.0-custom-1.5.14", new String(input.readAllBytes(), StandardCharsets.UTF_8));
-                        }
+            final Run run = repack(this.directory, candidates(this.directory, false, false, true));
+            assertEquals(0, run.exit(), run.log());
+            final Properties manifest = load(this.directory.resolve("tools/ffmpeg-manifest.properties"));
+            assertEquals("9.0-custom-1.5.14", manifest.getProperty("version"));
+            assertEquals("gpl", manifest.getProperty("variant"));
+            assertEquals("GPL-3.0-or-later", manifest.getProperty("license"));
+            for (final String archive: ARCHIVES) {
+                try (final var zip = new ZipFile(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip").toFile())) {
+                    // SEVEN COMPONENTS WITH THEIR JNI LIBRARIES AND THE MARKER; A GPL CANDIDATE CARRIES NO SUPPORT LIBRARIES
+                    assertEquals(15, zip.size(), archive + " entries");
+                    try (final var input = zip.getInputStream(zip.getEntry("version.cfg"))) {
+                        assertEquals("9.0-custom-1.5.14", new String(input.readAllBytes(), StandardCharsets.UTF_8));
                     }
                 }
-            } finally {
-                process.destroyForcibly();
             }
         }
 
@@ -188,33 +200,24 @@ public class RepackToolTest {
         void undeclaredProvenanceDoesNotBlockCustomCandidatesOrWriteNullMetadata() throws Exception {
             final Path candidates = candidates(this.directory, false, false, true);
             final Path configuration = this.directory.resolve("gradle.properties");
-            final Properties properties = new Properties();
-            try (final var input = Files.newInputStream(configuration)) { properties.load(input); }
+            final Properties properties = load(configuration);
             for (final String key: new String[] { "ffmpeg_source_ref", "ffmpeg_source_commit", "ffmpeg_source_sha256",
                     "libxml2_version", "libxml2_sha256", "openssl_version", "openssl_sha256",
                     "vulkan_headers_version", "vulkan_headers_sha256" })
                 properties.remove(key);
             try (final var output = Files.newOutputStream(configuration)) { properties.store(output, null); }
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(),
-                    this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertEquals(0, process.exitValue(), Files.readString(output));
-                final Properties manifest = new Properties();
-                try (final var input = Files.newInputStream(this.directory.resolve("tools/ffmpeg-manifest.properties"))) { manifest.load(input); }
-                assertNull(manifest.getProperty("source.ref"));
-                assertNull(manifest.getProperty("source.commit"));
-                assertNull(manifest.getProperty("libxml2.version"));
-                assertNull(manifest.getProperty("openssl.version"));
-                assertNull(manifest.getProperty("vulkan.headers.version"));
-                assertFalse(Files.readString(this.directory.resolve("tools/ffmpeg-manifest.properties")).contains("=null"));
-                assertEquals("rebuilt:9.0-custom-1.5.14/ffmpeg-9.0-custom-1.5.14-linux-x86_64-gpl.jar",
-                        manifest.getProperty("linux.source"));
-            } finally {
-                process.destroyForcibly();
-            }
+            final Run run = repack(this.directory, candidates);
+            assertEquals(0, run.exit(), run.log());
+            final Path manifestFile = this.directory.resolve("tools/ffmpeg-manifest.properties");
+            final Properties manifest = load(manifestFile);
+            assertNull(manifest.getProperty("source.ref"));
+            assertNull(manifest.getProperty("source.commit"));
+            assertNull(manifest.getProperty("libxml2.version"));
+            assertNull(manifest.getProperty("openssl.version"));
+            assertNull(manifest.getProperty("vulkan.headers.version"));
+            assertFalse(Files.readString(manifestFile).contains("=null"), "the manifest wrote a null value");
+            // WITHOUT A DECLARED REF THE SOURCE FALLS BACK TO THE VERSION
+            assertEquals("rebuilt:9.0-custom-1.5.14/ffmpeg-9.0-custom-1.5.14-linux-x86_64-gpl.jar", manifest.getProperty("linux.source"));
         }
     }
 
@@ -224,113 +227,80 @@ public class RepackToolTest {
         @TempDir Path directory;
 
         @Test
-        @DisplayName("Missing candidates cannot replace an installed security rebuild")
-        void missingCandidatesCannotReplaceAnInstalledSecurityRebuild() throws Exception {
-            Files.writeString(this.directory.resolve("gradle.properties"), "ffmpeg_version=8.1.2-1.5.14\nffmpeg_variant=lgpl\nffmpeg_license=LGPL-3.0-or-later\nffmpeg_compression=9\n");
-            Files.createDirectories(this.directory.resolve("tools"));
-            Files.writeString(this.directory.resolve("tools/ffmpeg-manifest.properties"), "source.kind=rebuilt\n");
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                assertTrue(Files.readString(output).contains("Usage: RepackFFmpeg <binaries-root> <verified-candidate-directory>"));
-                assertFalse(Files.exists(this.directory.resolve("src/main/resources/libs")));
-            } finally {
-                process.destroyForcibly();
-            }
+        @DisplayName("A single argument is refused with the usage text and writes nothing")
+        void singleArgumentPrintsTheUsageAndWritesNothing() throws Exception {
+            // VERIFIED CANDIDATES SIT IN THE ROOT, BUT THE TOOL NEVER GUESSES WHERE THEY ARE
+            candidates(this.directory, false, false, false);
+            final Path manifest = Files.createDirectories(this.directory.resolve("tools")).resolve("ffmpeg-manifest.properties");
+            Files.writeString(manifest, "existing manifest");
+            final Run run = repack(this.directory);
+            assertNotEquals(0, run.exit(), run.log());
+            assertTrue(run.log().contains("Usage: RepackFFmpeg <binaries-root> <verified-candidate-directory>"), run.log());
+            assertInstalledArchivesKept(this.directory);
+            assertEquals("existing manifest", Files.readString(manifest));
+            assertFalse(Files.exists(this.directory.resolve("build")), "the tool staged packages");
+            assertFalse(Files.exists(this.directory.resolve("libs")), "the tool copied a wrapper");
         }
 
         @Test
-        @DisplayName("An invalid candidate record keeps the installed archives")
-        void invalidCandidateRecordPreservesInstalledArchives() throws Exception {
-            Files.copy(Path.of("gradle.properties"), this.directory.resolve("gradle.properties"));
-            final Path library = Files.createDirectories(this.directory.resolve("src/main/resources/libs")).resolve("ffmpeg-linux.zip");
-            Files.writeString(library, "existing archive");
-            final Path candidates = Files.createDirectories(this.directory.resolve("candidates/linux-x86_64"));
-            Files.writeString(candidates.resolve("build.properties"), "version=8.1.2-1.5.14\nplatform=linux-x86_64\narchive=../other.jar\n");
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.getParent().toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                assertTrue(Files.readString(output).contains("Candidate version or native verification record does not match"));
-                assertEquals("existing archive", Files.readString(library));
-            } finally {
-                process.destroyForcibly();
-            }
+        @DisplayName("A candidate archive named outside its folder is refused and keeps every installed archive")
+        void archiveNameCannotLeaveItsCandidate() throws Exception {
+            final Path candidates = candidates(this.directory, false, false, false);
+            final Path candidate = candidates.resolve("linux-x86_64");
+            final Path recordPath = candidate.resolve("build.properties");
+            final Properties record = load(recordPath);
+            // THE TRAVERSAL TARGET IS A COPY OF THE VERIFIED JAR WITH THE SAME DIGEST, SO ONLY THE NAME CHECK CAN REFUSE IT
+            Files.copy(candidate.resolve(record.getProperty("archive")), candidates.resolve("other.jar"));
+            record.setProperty("archive", "../other.jar");
+            try (final var output = Files.newOutputStream(recordPath)) { record.store(output, null); }
+            final Run run = repack(this.directory, candidates);
+            assertNotEquals(0, run.exit(), run.log());
+            assertTrue(run.log().contains("Candidate version or native verification record does not match: "
+                    + candidate.toAbsolutePath().normalize()), run.log());
+            assertInstalledArchivesKept(this.directory);
+            assertFalse(Files.exists(this.directory.resolve("tools/ffmpeg-manifest.properties")), "the tool wrote a manifest");
         }
 
         @Test
         @DisplayName("An invalid last candidate keeps every installed archive")
         void invalidFinalCandidatePreservesEveryInstalledArchive() throws Exception {
-            final Path candidates = candidates(this.directory, true, false, false);
-            final Path resources = this.directory.resolve("src/main/resources/libs");
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                final String log = Files.readString(output);
-                assertTrue(log.contains("ffmpeg-macos-arm64.zip:"), log);
-                assertTrue(log.contains("Candidate version or native verification record does not match"), log);
-                for (final String archive: ARCHIVES) assertEquals("existing " + archive, Files.readString(resources.resolve("ffmpeg-" + archive + ".zip")));
-                assertFalse(Files.exists(this.directory.resolve("tools/ffmpeg-manifest.properties")));
-            } finally {
-                process.destroyForcibly();
-            }
+            final Run run = repack(this.directory, candidates(this.directory, true, false, false));
+            assertNotEquals(0, run.exit(), run.log());
+            // THE FIRST FOUR PLATFORMS STAGED THEIR PACKAGES BEFORE THE LAST RECORD FAILED
+            assertTrue(run.log().contains("ffmpeg-macos-arm64.zip:"), run.log());
+            assertTrue(run.log().contains("Candidate version or native verification record does not match"), run.log());
+            assertInstalledArchivesKept(this.directory);
+            assertFalse(Files.exists(this.directory.resolve("tools/ffmpeg-manifest.properties")), "the tool wrote a manifest");
         }
 
         @Test
         @DisplayName("A missing JNI component keeps the archives and the manifest")
         void missingJniComponentPreservesArchivesAndManifest() throws Exception {
             final Path candidates = candidates(this.directory, false, true, false);
-            final Path resources = this.directory.resolve("src/main/resources/libs");
             final Path manifest = Files.createDirectories(this.directory.resolve("tools")).resolve("ffmpeg-manifest.properties");
             Files.writeString(manifest, "existing manifest");
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                final String log = Files.readString(output);
-                assertTrue(log.contains("Missing native or JNI component: avcodec"), log);
-                for (final String archive: ARCHIVES) assertEquals("existing " + archive, Files.readString(resources.resolve("ffmpeg-" + archive + ".zip")));
-                assertEquals("existing manifest", Files.readString(manifest));
-            } finally {
-                process.destroyForcibly();
-            }
+            final Run run = repack(this.directory, candidates);
+            assertNotEquals(0, run.exit(), run.log());
+            assertTrue(run.log().contains("Missing native or JNI component: avcodec"), run.log());
+            assertInstalledArchivesKept(this.directory);
+            assertEquals("existing manifest", Files.readString(manifest));
         }
 
         @Test
-        @DisplayName("A security candidate cannot omit the headers protection")
-        void priorSecurityCandidateCannotOmitHeadersProtection() throws Exception {
+        @DisplayName("A candidate without the declared headers patch digest keeps the archives and the manifest")
+        void candidateCannotOmitTheHeadersPatch() throws Exception {
             final Path candidates = candidates(this.directory, false, false, false);
             final Path recordPath = candidates.resolve("linux-x86_64/build.properties");
-            final Properties record = new Properties();
-            try (final var input = Files.newInputStream(recordPath)) { record.load(input); }
+            final Properties record = load(recordPath);
             record.remove("headers.patch.sha256");
             try (final var output = Files.newOutputStream(recordPath)) { record.store(output, null); }
             final Path manifest = Files.createDirectories(this.directory.resolve("tools")).resolve("ffmpeg-manifest.properties");
             Files.writeString(manifest, "existing manifest");
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                final String log = Files.readString(output);
-                assertTrue(log.contains("Candidate provenance mismatch for headers.patch.sha256"), log);
-                for (final String archive: ARCHIVES)
-                    assertEquals("existing " + archive, Files.readString(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip")));
-                assertEquals("existing manifest", Files.readString(manifest));
-            } finally {
-                process.destroyForcibly();
-            }
+            final Run run = repack(this.directory, candidates);
+            assertNotEquals(0, run.exit(), run.log());
+            assertTrue(run.log().contains("Candidate provenance mismatch for headers.patch.sha256"), run.log());
+            assertInstalledArchivesKept(this.directory);
+            assertEquals("existing manifest", Files.readString(manifest));
         }
 
         @Test
@@ -338,23 +308,17 @@ public class RepackToolTest {
         void candidateVariantMustMatchDeclaredBuild() throws Exception {
             final Path candidates = candidates(this.directory, false, false, false);
             final Path recordPath = candidates.resolve("linux-x86_64/build.properties");
-            final Properties record = new Properties();
-            try (final var input = Files.newInputStream(recordPath)) { record.load(input); }
+            final Properties record = load(recordPath);
             record.setProperty("variant", "gpl");
             record.setProperty("license", "GPL-3.0-or-later");
             try (final var output = Files.newOutputStream(recordPath)) { record.store(output, null); }
-            final Path output = this.directory.resolve("process.log");
-            final var process = new ProcessBuilder(java(), Path.of("tools/RepackFFmpeg.java").toAbsolutePath().toString(), this.directory.toString(), candidates.toString())
-                    .redirectErrorStream(true).redirectOutput(output.toFile()).start();
-            try {
-                assertTrue(process.waitFor(20, TimeUnit.SECONDS));
-                assertNotEquals(0, process.exitValue());
-                assertTrue(Files.readString(output).contains("Candidate version or native verification record does not match"));
-                for (final String archive: ARCHIVES)
-                    assertEquals("existing " + archive, Files.readString(this.directory.resolve("src/main/resources/libs/ffmpeg-" + archive + ".zip")));
-            } finally {
-                process.destroyForcibly();
-            }
+            final Run run = repack(this.directory, candidates);
+            assertNotEquals(0, run.exit(), run.log());
+            assertTrue(run.log().contains("Candidate version or native verification record does not match"), run.log());
+            assertInstalledArchivesKept(this.directory);
         }
     }
+
+    // ONE RUN OF THE TOOL: ITS EXIT CODE AND ITS OUTPUT
+    private record Run(int exit, String log) {}
 }
