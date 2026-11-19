@@ -1,3 +1,8 @@
+# 📦 UPDATE 3.0.2
+- 🛠️ Loads on any Minecraft version from 1.18.2 up, any Forge, NeoForge or Fabric version and Java 17 or newer
+  - New Minecraft versions, like 26.3, only need a WATERMeDIA update
+- 🛠️ Now requires WATERMeDIA 3.0.1 or newer
+
 # 📦 UPDATE 3.0.1
 - 🛠️ Reworked bootstrap internals
 - 🐛 Fixed JitPack builds failing to find WATERMeDIA
