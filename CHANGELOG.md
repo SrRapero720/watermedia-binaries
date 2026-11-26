@@ -1,3 +1,7 @@
+# 📦 UPDATE 3.0.3
+- 🐛 Fixed the missing icon in the NeoForge mod list on Minecraft 26.2 and newer
+  - Mod developers no longer get a `logoFile` warning screen when the game starts
+
 # 📦 UPDATE 3.0.2
 - 🛠️ Loads on any Minecraft version from 1.18.2 up, any Forge, NeoForge or Fabric version and Java 17 or newer
   - New Minecraft versions, like 26.3, only need a WATERMeDIA update
