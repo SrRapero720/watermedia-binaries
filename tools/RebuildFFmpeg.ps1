@@ -22,6 +22,8 @@ $extension = if ($variant -ceq 'gpl') { '-gpl' } else { '' }
 $buildPlatform = "$Platform$extension"
 $headersPatch = Join-Path $PSScriptRoot 'ffmpeg-headers.patch'
 if ($properties.ffmpeg_headers_patch_sha256 -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $headersPatch -Algorithm SHA256).Hash -ine $properties.ffmpeg_headers_patch_sha256) { throw 'Native HTTP headers patch SHA-256 mismatch' }
+$keepalivePatch = Join-Path $PSScriptRoot 'ffmpeg-http-keepalive.patch'
+if ($properties.ffmpeg_keepalive_patch_sha256 -notmatch '^[a-f0-9]{64}$' -or (Get-FileHash -LiteralPath $keepalivePatch -Algorithm SHA256).Hash -ine $properties.ffmpeg_keepalive_patch_sha256) { throw 'Native HTTP keep-alive patch SHA-256 mismatch' }
 $repository = $properties.ffmpeg_source_repository
 if ($repository -cnotmatch '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$' -or $revision -notmatch '^[a-f0-9]{40}$' -or $sourceCommit -notmatch '^[a-f0-9]{40}$' -or $xmlVersion -notmatch '^\d+\.\d+\.\d+$' -or $sslVersion -notmatch '^\d+\.\d+\.\d+$' -or $vulkanVersion -notmatch '^\d+\.\d+\.\d+$' -or $variant -cnotin @('lgpl', 'gpl') -or [string]::IsNullOrWhiteSpace($properties.ffmpeg_license)) {
     throw 'Native source repository and revisions, build variant and license metadata must be declared in gradle.properties'
@@ -103,7 +105,7 @@ $changes = @(
     @('echo "[binaries]" >>', 'echo "[binaries]" >'),
     @('--disable-xlib"', '--disable-xlib --disable-vdpau"'),
     @('-lWs2_32 -lcrypt32 -lpthread', '-lWs2_32 -lcrypt32 -lbcrypt -lpthread'),
-    @('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-tls-winstore.patch', ('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-tls-winstore.patch' + "`n" + 'patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-headers.patch'))
+    @('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-tls-winstore.patch', ('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-tls-winstore.patch' + "`n" + 'patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-headers.patch' + "`n" + 'patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-http-keepalive.patch'))
 )
 foreach ($change in $changes) {
     if ($change.Count -ne 2) { throw 'Each native recipe replacement must contain exactly two strings' }
@@ -159,7 +161,9 @@ if ($variant -ceq 'lgpl') {
 if (!$recipe.Contains("FFMPEG_VERSION=$ffmpegVersion")) { throw 'Source FFmpeg version disagrees with the Java wrappers' }
 if ([regex]::Matches($recipe, [regex]::Escape('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-tls.patch')).Count -ne 1) { throw 'The native recipe must apply the TLS patch exactly once' }
 if ([regex]::Matches($recipe, [regex]::Escape('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-headers.patch')).Count -ne 1) { throw 'The native recipe must apply the HTTP headers patch exactly once' }
+if ([regex]::Matches($recipe, [regex]::Escape('patch -Np1 -d ffmpeg-$FFMPEG_VERSION < ../../ffmpeg-http-keepalive.patch')).Count -ne 1) { throw 'The native recipe must apply the HTTP keep-alive patch exactly once' }
 Copy-Item -LiteralPath $headersPatch -Destination (Join-Path $source 'ffmpeg/ffmpeg-headers.patch') -Force
+Copy-Item -LiteralPath $keepalivePatch -Destination (Join-Path $source 'ffmpeg/ffmpeg-http-keepalive.patch') -Force
 [IO.File]::WriteAllText((Join-Path $source 'ffmpeg/cppbuild.sh'), $recipe, [Text.UTF8Encoding]::new($false))
 $upstreamVersion = '<version>' + $ffmpegVersion + '-${project.parent.version}</version>'
 if (!$pom.Contains($upstreamVersion)) { throw 'Unexpected FFmpeg Maven version expression' }
@@ -238,6 +242,7 @@ Write-Output "Verified FFmpeg $ffmpegVersion SHA-256: $($properties.ffmpeg_sha25
 Write-Output "Verified Vulkan headers $vulkanVersion SHA-256: $($properties.vulkan_headers_sha256)"
 Write-Output "Verified $variant recipe and JavaCPP $javaVersion Maven profile"
 Write-Output "Verified HTTP headers patch SHA-256: $($properties.ffmpeg_headers_patch_sha256)"
+Write-Output "Verified HTTP keep-alive patch SHA-256: $($properties.ffmpeg_keepalive_patch_sha256)"
 if ($PrepareOnly) { return }
 
 if (!$VerifyOnly) {
@@ -294,7 +299,7 @@ if (!$VerifyOnly) {
     } finally { Pop-Location }
 }
 $ffmpegSource = [IO.Path]::GetFullPath((Join-Path $source "ffmpeg/cppbuild/$buildPlatform/ffmpeg-$ffmpegVersion"))
-$patches = @($tlsPatch, $headersPatch)
+$patches = @($tlsPatch, $headersPatch, $keepalivePatch)
 $paths = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($patch in $patches) {
     foreach ($line in [IO.File]::ReadLines($patch)) {
@@ -502,6 +507,7 @@ $lines = @(
     "vulkan.headers.version=$vulkanVersion",
     "vulkan.headers.sha256=$($properties.vulkan_headers_sha256)",
     "headers.patch.sha256=$($properties.ffmpeg_headers_patch_sha256)",
+    "keepalive.patch.sha256=$($properties.ffmpeg_keepalive_patch_sha256)",
     "recipe.sha256=$((Get-FileHash -LiteralPath (Join-Path $source 'ffmpeg/cppbuild.sh') -Algorithm SHA256).Hash.ToLowerInvariant())",
     "verification=JNI-wrappers,vulkan-bindings,vulkan-filters,libkvazaar,DASH,recursive-entities,libxml2-version,openssl-version,imports-closure,clean-environment,TLS,HTTP-headers,$(if ($variant -ceq 'gpl') { 'GPL,libx264,libx265' } else { 'LGPL,no-x264,no-x265' })",
     "archive=$classifier",

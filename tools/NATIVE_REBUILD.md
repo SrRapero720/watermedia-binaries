@@ -33,6 +33,12 @@ Windows ROOT store when no `ca_file` is given; on Linux and macOS its OpenSSL re
 `RebuildFFmpeg.ps1` applies the checksum-pinned `ffmpeg-headers.patch` right after them; it binds sensitive HTTP
 headers to their original request origin across redirects and nested streams. Its checksum is required for
 candidates using this recipe.
+After it comes the checksum-pinned `ffmpeg-http-keepalive.patch` (five commits of `libavformat/http.c`). It backports
+FFmpeg's b66d2aca0f, which reuses a connection only for the host it is connected to and which 9.0.2 lacks (a reused
+connection could send credentials to another host). It also keeps a second connection for the other host of a
+redirect, so an HLS segment that its CDN redirects every time costs one handshake instead of two, and it resends a
+request once on a new connection when a kept one dies before any reply. Its checksum is required for candidates
+using this recipe too.
 Custom candidates may supply equivalent capabilities through different sources; the packer checks
 the declared provenance and artifact hashes, while native behavior must be verified on its target platform.
 `Authorization`, `Proxy-Authorization`, `Cookie`, `Cookie2` and `X-WaterMedia-Token` are retained only
@@ -92,7 +98,7 @@ These checks are regression probes, not proof of exhaustive vulnerability covera
 A second fresh Java process runs `VerifyTLS.java` against local HTTPS fixtures. Trusted DNS/IP peers
 and nested HLS/DASH reads must work; untrusted certificates and incorrect endpoint identities must
 be rejected before any HTTP request reaches the rejected peer. Candidates are exported only after
-both probes pass, and their records include the source archive and HTTP headers patch hashes.
+both probes pass, and their records include the source archive, HTTP headers and HTTP keep-alive patch hashes.
 The same suite verifies header and cookie isolation across redirects, ports and nested HLS/DASH reads,
 including same-origin positive cases and a return to the original origin after a foreign request.
 The build verifies the round-trip patch set in an isolated copy of only the touched source files.

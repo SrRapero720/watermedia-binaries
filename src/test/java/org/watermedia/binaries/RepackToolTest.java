@@ -50,6 +50,7 @@ public class RepackToolTest {
             properties.setProperty("ffmpeg_variant", "gpl");
             properties.setProperty("ffmpeg_license", "GPL-3.0-or-later");
             properties.remove("ffmpeg_headers_patch_sha256");
+            properties.remove("ffmpeg_keepalive_patch_sha256");
         }
         try (final var output = Files.newOutputStream(directory.resolve("gradle.properties"))) { properties.store(output, null); }
         final Path resources = Files.createDirectories(directory.resolve("src/main/resources/libs"));
@@ -102,6 +103,7 @@ public class RepackToolTest {
             record.setProperty("vulkan.headers.version", properties.getProperty("vulkan_headers_version"));
             record.setProperty("vulkan.headers.sha256", properties.getProperty("vulkan_headers_sha256"));
             if (!gpl) record.setProperty("headers.patch.sha256", properties.getProperty("ffmpeg_headers_patch_sha256"));
+            if (!gpl) record.setProperty("keepalive.patch.sha256", properties.getProperty("ffmpeg_keepalive_patch_sha256"));
             record.setProperty("recipe.sha256", "0".repeat(64));
             record.setProperty("verification", invalidFinal && i == platforms.length - 1 ? "missing-TLS"
                     : gpl ? "JNI-wrappers,vulkan-bindings,vulkan-filters,libkvazaar,DASH,recursive-entities,imports-closure,clean-environment,TLS,HTTP-headers,GPL,libx264"
@@ -161,6 +163,7 @@ public class RepackToolTest {
             assertEquals("wrapper of linux-x86_64", Files.readString(this.directory.resolve("libs/ffmpeg-" + manifest.getProperty("version") + ".jar")));
             assertEquals(manifest.getProperty("linux.wrapper.sha256"), manifest.getProperty("wrapper.sha256"));
             assertEquals(load(Path.of("gradle.properties")).getProperty("ffmpeg_source_repository"), manifest.getProperty("source.repository"));
+            assertEquals(load(Path.of("gradle.properties")).getProperty("ffmpeg_keepalive_patch_sha256"), manifest.getProperty("keepalive.patch.sha256"));
             for (final String archive: ARCHIVES) {
                 assertEquals(64, manifest.getProperty(archive + ".wrapper.sha256").length(), archive + " wrapper digest");
                 assertFalse(manifest.getProperty(archive + ".source").contains("-gpl"), manifest.getProperty(archive + ".source"));
@@ -287,20 +290,23 @@ public class RepackToolTest {
         }
 
         @Test
-        @DisplayName("A candidate without the declared headers patch digest keeps the archives and the manifest")
-        void candidateCannotOmitTheHeadersPatch() throws Exception {
-            final Path candidates = candidates(this.directory, false, false, false);
-            final Path recordPath = candidates.resolve("linux-x86_64/build.properties");
-            final Properties record = load(recordPath);
-            record.remove("headers.patch.sha256");
-            try (final var output = Files.newOutputStream(recordPath)) { record.store(output, null); }
-            final Path manifest = Files.createDirectories(this.directory.resolve("tools")).resolve("ffmpeg-manifest.properties");
-            Files.writeString(manifest, "existing manifest");
-            final Run run = repack(this.directory, candidates);
-            assertNotEquals(0, run.exit(), run.log());
-            assertTrue(run.log().contains("Candidate provenance mismatch for headers.patch.sha256"), run.log());
-            assertInstalledArchivesKept(this.directory);
-            assertEquals("existing manifest", Files.readString(manifest));
+        @DisplayName("A candidate without a declared patch digest (headers or keep-alive) keeps the archives and the manifest")
+        void candidateCannotOmitAPatch() throws Exception {
+            for (final String key: new String[] { "headers.patch.sha256", "keepalive.patch.sha256" }) {
+                final Path directory = Files.createDirectory(this.directory.resolve(key));
+                final Path candidates = candidates(directory, false, false, false);
+                final Path recordPath = candidates.resolve("linux-x86_64/build.properties");
+                final Properties record = load(recordPath);
+                record.remove(key);
+                try (final var output = Files.newOutputStream(recordPath)) { record.store(output, null); }
+                final Path manifest = Files.createDirectories(directory.resolve("tools")).resolve("ffmpeg-manifest.properties");
+                Files.writeString(manifest, "existing manifest");
+                final Run run = repack(directory, candidates);
+                assertNotEquals(0, run.exit(), run.log());
+                assertTrue(run.log().contains("Candidate provenance mismatch for " + key), run.log());
+                assertInstalledArchivesKept(directory);
+                assertEquals("existing manifest", Files.readString(manifest));
+            }
         }
 
         @Test

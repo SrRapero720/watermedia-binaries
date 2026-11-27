@@ -73,6 +73,7 @@ public final class RepackFFmpeg {
         metadata.put("vulkan_headers_version", "vulkan.headers.version");
         metadata.put("vulkan_headers_sha256", "vulkan.headers.sha256");
         metadata.put("ffmpeg_headers_patch_sha256", "headers.patch.sha256");
+        metadata.put("ffmpeg_keepalive_patch_sha256", "keepalive.patch.sha256");
         for (final var entry: metadata.entrySet()) {
             final String value = properties.getProperty(entry.getKey());
             if (value == null || value.isBlank()) continue;

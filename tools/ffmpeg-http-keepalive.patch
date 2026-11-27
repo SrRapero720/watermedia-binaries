@@ -1,0 +1,436 @@
+From 5b19785a37aedf7841dd07dfb51d3b7d83aeab02 Mon Sep 17 00:00:00 2001
+From: Michael Niedermayer <michael@niedermayer.cc>
+Date: Wed, 11 Nov 2026 19:22:26 +0100
+Subject: [PATCH 1/5] avformat/http: reuse a connection only for the host it is
+ connected to
+
+Fixes: sending credentials to another host
+Fixes: q0uD8AyJRreA
+Regression since: e03b034e45
+Credential disclosure Replicated through UnModified FFmpeg with a local HTTP server
+
+Found-by: mxyoor
+(cherry picked from commit b66d2aca0fc1b6d23c685c21ecbbca3ad8b32c79)
+---
+ libavformat/http.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git a/libavformat/http.c b/libavformat/http.c
+index b4e33843e8..5c48787d03 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -330,6 +330,9 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
+ 
+     ff_url_join(buf, sizeof(buf), lower_proto, NULL, hostname, port, NULL);
+ 
++    if (s->hd && strcmp(s->hd->filename, buf))
++        ffurl_closep(&s->hd);
++
+     if (!s->hd) {
+         s->nb_connections++;
+         err = ffurl_open_whitelist(&s->hd, buf, AVIO_FLAG_READ_WRITE,
+-- 
+2.53.0.windows.2
+
+
+From edfba215d93ca54dbf45f4439bbf6902bbd9e57c Mon Sep 17 00:00:00 2001
+From: J-RAP <srrapero720@hotmail.com>
+Date: Fri, 27 Nov 2026 13:35:23 -0600
+Subject: [PATCH 2/5] avformat/http: send a request again when its kept
+ connection was closed
+
+A server may close a persistent connection while it is idle, for example
+when its keep-alive timeout expires. The next request that is sent on
+that connection then fails before any reply arrives. With the default
+options this fails the request: the reconnection options are disabled,
+and only some callers of ff_http_do_new_request() fall back to opening
+a new context.
+
+Send such a request once more on a new connection, as other HTTP clients
+do. This is limited to requests that received no reply at all and can be
+repeated without side effects: GET and HEAD requests without data to
+send.
+
+(cherry picked from commit a31707a0355abacfe15b5ce252f5c9204a49c002)
+Signed-off-by: J-RAP <srrapero720@hotmail.com>
+---
+ libavformat/http.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+)
+
+diff --git a/libavformat/http.c b/libavformat/http.c
+index 5c48787d03..abe5e15d39 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -72,6 +72,11 @@ typedef enum {
+ typedef struct HTTPContext {
+     const AVClass *class;
+     URLContext *hd;
++    /**
++     * Set if the request was sent on a connection that carried an earlier
++     * one, which the server may have closed in the meantime.
++     */
++    int reused;
+     unsigned char buffer[BUFFER_SIZE], *buf_ptr, *buf_end;
+     int line_count;
+     int http_code;
+@@ -333,6 +338,7 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
+     if (s->hd && strcmp(s->hd->filename, buf))
+         ffurl_closep(&s->hd);
+ 
++    s->reused = !!s->hd;
+     if (!s->hd) {
+         s->nb_connections++;
+         err = ffurl_open_whitelist(&s->hd, buf, AVIO_FLAG_READ_WRITE,
+@@ -454,8 +460,26 @@ redo:
+     cur_proxy_auth_type = s->auth_state.auth_type;
+ 
+     off = s->off;
++    s->http_code = 0;
++    s->reused    = 0;
+     ret = http_open_cnx_internal(h, options);
+     if (ret < 0) {
++        /* A kept connection that the server closed while it was idle fails
++         * the request before any reply arrives. Send the request once more
++         * on a new connection, unless sending it twice could have side
++         * effects. */
++        if (s->reused && !s->http_code && ret != AVERROR_EXIT &&
++            !(h->flags & AVIO_FLAG_WRITE) && !s->post_data &&
++            (!s->method || !strcmp(s->method, "GET") ||
++             !strcmp(s->method, "HEAD"))) {
++            av_log(h, AV_LOG_VERBOSE, "Kept connection failed: %s, "
++                   "opening a new one.\n", av_err2str(ret));
++            s->nb_reconnects++;
++            s->off = off;
++            ffurl_closep(&s->hd);
++            goto redo;
++        }
++
+         if (!http_should_reconnect(s, ret) ||
+             reconnect_delay > s->reconnect_delay_max ||
+             (s->reconnect_max_retries >= 0 && conn_attempts > s->reconnect_max_retries) ||
+-- 
+2.53.0.windows.2
+
+
+From b87231f60e15b3cae436fadb11bc5f2c4b536525 Mon Sep 17 00:00:00 2001
+From: J-RAP <srrapero720@hotmail.com>
+Date: Fri, 27 Nov 2026 13:35:24 -0600
+Subject: [PATCH 3/5] avformat/http: do not reuse a connection whose reply was
+ not read to its end
+
+ff_http_do_new_request2() sends the new request on the connection of the
+previous one even when that reply was not read completely. The rest of
+the old reply is then read as the reply to the new request. Usually that
+fails with a malformed status line, but a body that starts with an empty
+line is taken as a complete reply without a status, and the real reply
+is returned as its data. hls does this, for example, when it fails to
+parse a playlist and reloads it on the same context.
+
+Send the request on a new connection when data of the previous reply is
+still buffered or its end was not reached. Requests for writing keep
+their connection, their replies are not read this way.
+
+(cherry picked from commit 33515feadd886723e9933d260a67a790f5d7b658)
+Signed-off-by: J-RAP <srrapero720@hotmail.com>
+---
+ libavformat/http.c | 13 +++++++++++++
+ 1 file changed, 13 insertions(+)
+
+diff --git a/libavformat/http.c b/libavformat/http.c
+index abe5e15d39..ba13fd232c 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -611,6 +611,19 @@ int ff_http_do_new_request2(URLContext *h, const char *uri, AVDictionary **opts)
+     if (s->willclose)
+         return AVERROR_EOF;
+ 
++    /* The rest of a reply that was not read to its end would be taken as
++     * the reply to the new request, so that one needs a new connection. */
++    if (s->hd && !(h->flags & AVIO_FLAG_WRITE)) {
++        int done = s->buf_ptr == s->buf_end;
++
++        if (s->chunksize != UINT64_MAX)
++            done &= s->chunkend;
++        else if (!s->method || av_strcasecmp(s->method, "HEAD"))
++            done &= s->off == (s->range_end ? s->range_end : s->filesize);
++        if (!done)
++            ffurl_closep(&s->hd);
++    }
++
+     s->end_chunked_post = 0;
+     s->chunkend      = 0;
+     s->range_end     = 0;
+-- 
+2.53.0.windows.2
+
+
+From fa0886667943f8736984fd3d4896394bdec0553d Mon Sep 17 00:00:00 2001
+From: J-RAP <srrapero720@hotmail.com>
+Date: Fri, 27 Nov 2026 13:35:24 -0600
+Subject: [PATCH 4/5] avformat/http: keep the connection to another host for
+ the next request
+
+A persistent connection is lost whenever a request goes to another host
+than the previous one: ff_http_do_new_request2() refuses the request,
+and following a redirect to another host closes the connection to the
+first one.
+
+A server that redirects every segment of a HLS playlist to a second host
+runs into both on every segment. After a segment, the context leads to
+the second host while the next segment names the first one, so hls opens
+a new context, which connects to both hosts again. Over TLS that costs
+two handshakes per segment.
+
+Keep the connection that does not lead to the host of a request in a
+second slot instead of closing it, and take it back for the next request
+to its host. ff_http_do_new_request2() accepts requests to another host
+and restarts the authentication for it, as a redirect does. A connection
+is still only used for the host it leads to. This keeps at most one more
+idle connection per context and sends no additional requests.
+
+The segments of such a playlist now share the connection to the second
+host.
+
+(cherry picked from commit cac2dc6c40f8ab05c87c92db3dbe611a5b431531)
+Signed-off-by: J-RAP <srrapero720@hotmail.com>
+---
+ libavformat/http.c | 44 ++++++++++++++++++++++++++++++--------------
+ 1 file changed, 30 insertions(+), 14 deletions(-)
+
+diff --git a/libavformat/http.c b/libavformat/http.c
+index ba13fd232c..d9c2490c4c 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -72,6 +72,11 @@ typedef enum {
+ typedef struct HTTPContext {
+     const AVClass *class;
+     URLContext *hd;
++    /**
++     * Connection to the host of an earlier request, kept open for the next
++     * request to that host while hd leads to another one.
++     */
++    URLContext *hd_idle;
+     /**
+      * Set if the request was sent on a connection that carried an earlier
+      * one, which the server may have closed in the meantime.
+@@ -335,8 +340,15 @@ static int http_open_cnx_internal(URLContext *h, AVDictionary **options)
+ 
+     ff_url_join(buf, sizeof(buf), lower_proto, NULL, hostname, port, NULL);
+ 
+-    if (s->hd && strcmp(s->hd->filename, buf))
+-        ffurl_closep(&s->hd);
++    /* Requests that are redirected to another host alternate between two
++     * hosts, so the connection to the other one is kept for its next
++     * request. A connection is only used for the host it leads to. */
++    if (s->hd_idle && !strcmp(s->hd_idle->filename, buf)) {
++        FFSWAP(URLContext *, s->hd, s->hd_idle);
++    } else if (s->hd && strcmp(s->hd->filename, buf)) {
++        ffurl_closep(&s->hd_idle);
++        FFSWAP(URLContext *, s->hd, s->hd_idle);
++    }
+ 
+     s->reused = !!s->hd;
+     if (!s->hd) {
+@@ -435,15 +447,17 @@ static int http_open_cnx(URLContext *h, AVDictionary **options)
+     int ret, conn_attempts = 1, auth_attempts = 0, redirects = 0;
+     int reconnect_delay = 0;
+     int reconnect_delay_total = 0;
+-    uint64_t off;
++    uint64_t off = s->off;
+     char *cached;
+ 
+ redo:
+ 
+     cached = redirect_cache_get(s);
+     if (cached) {
+-        if (redirects++ >= s->max_redirects)
+-            return AVERROR(EIO);
++        if (redirects++ >= s->max_redirects) {
++            ret = AVERROR(EIO);
++            goto fail;
++        }
+ 
+         av_free(s->location);
+         s->location = av_strdup(cached);
+@@ -533,8 +547,10 @@ redo:
+         s->new_location) {
+         /* url moved, get next */
+         ffurl_closep(&s->hd);
+-        if (redirects++ >= s->max_redirects)
+-            return AVERROR(EIO);
++        if (redirects++ >= s->max_redirects) {
++            ret = AVERROR(EIO);
++            goto fail;
++        }
+ 
+         if (!s->expires) {
+             s->expires = (s->http_code == 301 || s->http_code == 308) ? INT64_MAX : -1;
+@@ -561,6 +577,7 @@ fail:
+     s->off = off;
+     if (s->hd)
+         ffurl_closep(&s->hd);
++    ffurl_closep(&s->hd_idle);
+     if (ret < 0)
+         return ret;
+     return ff_http_averror(s->http_code, AVERROR(EIO));
+@@ -594,13 +611,6 @@ int ff_http_do_new_request2(URLContext *h, const char *uri, AVDictionary **opts)
+                proto1, proto2);
+         return AVERROR(EINVAL);
+     }
+-    if (port1 != port2 || strncmp(hostname1, hostname2, sizeof(hostname2)) != 0) {
+-        av_log(h, AV_LOG_INFO, "Cannot reuse HTTP connection for different host: %s:%d != %s:%d\n",
+-            hostname1, port1,
+-            hostname2, port2
+-        );
+-        return AVERROR(EINVAL);
+-    }
+ 
+     if (!s->end_chunked_post) {
+         ret = http_shutdown(h, h->flags);
+@@ -624,6 +634,11 @@ int ff_http_do_new_request2(URLContext *h, const char *uri, AVDictionary **opts)
+             ffurl_closep(&s->hd);
+     }
+ 
++    /* Restart the authentication process with another host, as a redirect
++     * to it does. */
++    if (port1 != port2 || strcmp(hostname1, hostname2))
++        memset(&s->auth_state, 0, sizeof(s->auth_state));
++
+     s->end_chunked_post = 0;
+     s->chunkend      = 0;
+     s->range_end     = 0;
+@@ -2226,6 +2241,7 @@ static int http_close(URLContext *h)
+ 
+     if (s->hd)
+         ffurl_closep(&s->hd);
++    ffurl_closep(&s->hd_idle);
+     av_dict_free(&s->chained_options);
+     av_dict_free(&s->cookie_dict);
+     av_dict_free(&s->redirect_cache);
+-- 
+2.53.0.windows.2
+
+
+From 1c3aa43f8a3558a6eb3bad526812f53692f6725d Mon Sep 17 00:00:00 2001
+From: J-RAP <srrapero720@hotmail.com>
+Date: Fri, 27 Nov 2026 13:35:25 -0600
+Subject: [PATCH 5/5] avformat/http: keep the connection that answered with a
+ redirect
+
+The connection is closed whenever its reply is a redirect, although the
+next request often goes to the same host: the redirect may stay on that
+host, and requests that are redirected to another host come back to the
+first one with their next request.
+
+Skip the body of a redirect when it arrived completely with the header,
+which is the common case for such short replies, and keep the
+connection. Waiting for more data could stall on a broken server, so a
+body that is not buffered completely, a reply without a known length or
+with data after its end, a reply that announces the end of the
+connection and the reply to an upload whose data was not sent yet still
+close it.
+
+With the previous commit, the segments of a HLS playlist that are all
+redirected from one host to another no longer need new connections.
+
+(cherry picked from commit e62f886ce28a6922d01f5154a5d928c3a7edd512)
+Signed-off-by: J-RAP <srrapero720@hotmail.com>
+---
+ libavformat/http.c | 74 +++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 73 insertions(+), 1 deletion(-)
+
+diff --git a/libavformat/http.c b/libavformat/http.c
+index d9c2490c4c..b61ecdd41a 100644
+--- a/libavformat/http.c
++++ b/libavformat/http.c
+@@ -439,6 +439,77 @@ static int redirect_cache_set(HTTPContext *s, const char *source, const char *de
+     return 0;
+ }
+ 
++/**
++ * Skip the body of a reply that is answered with another request, so that
++ * its connection can carry that request. This only uses the data that
++ * arrived with the header, as waiting for more could stall on a broken
++ * server.
++ *
++ * @return non zero if the body was skipped, 0 if the connection has to be
++ *         closed instead
++ */
++static int http_skip_body(URLContext *h)
++{
++    HTTPContext *s = h->priv_data;
++    const uint8_t *p = s->buf_ptr, *end = s->buf_end;
++
++    /* The body of an upload may not have been sent yet, and the length of
++     * a partial reply is that of its range. */
++    if (s->willclose || ((h->flags & AVIO_FLAG_WRITE) && !s->post_data) ||
++        s->filesize_from_content_range != UINT64_MAX)
++        return 0;
++
++    if (s->chunksize == UINT64_MAX) {
++        /* a HEAD reply states the length of a body it does not carry */
++        uint64_t size = s->method && !av_strcasecmp(s->method, "HEAD") ?
++                        0 : s->filesize;
++
++        if (size > (uint64_t)(end - p))
++            return 0;
++        p += size;
++    } else {
++        for (;;) {
++            const uint8_t *eol = memchr(p, '\n', end - p), *digits = p;
++            uint64_t size = 0;
++
++            if (!eol)
++                return 0;
++            for (; p < eol && av_isxdigit(*p); p++) {
++                if (size >> 60)
++                    return 0;
++                size = size * 16 + (av_isdigit(*p) ? *p - '0' :
++                                                     av_tolower(*p) - 'a' + 10);
++            }
++            if (p == digits)
++                return 0;
++            p = eol + 1;
++            if (!size)
++                break;
++            /* the chunk data and its CRLF */
++            if (size + 2 > (uint64_t)(end - p) ||
++                p[size] != '\r' || p[size + 1] != '\n')
++                return 0;
++            p += size + 2;
++        }
++        /* the trailer section ends with an empty line */
++        for (;;) {
++            const uint8_t *eol = memchr(p, '\n', end - p), *line = p;
++
++            if (!eol)
++                return 0;
++            p = eol + 1;
++            if (eol == line || (eol == line + 1 && *line == '\r'))
++                break;
++        }
++    }
++
++    /* Anything after the body would be read as the next reply. */
++    if (p != end)
++        return 0;
++    s->buf_ptr = s->buf_end;
++    return 1;
++}
++
+ /* return non zero if error */
+ static int http_open_cnx(URLContext *h, AVDictionary **options)
+ {
+@@ -546,7 +617,8 @@ redo:
+          s->http_code == 303 || s->http_code == 307 || s->http_code == 308) &&
+         s->new_location) {
+         /* url moved, get next */
+-        ffurl_closep(&s->hd);
++        if (!http_skip_body(h))
++            ffurl_closep(&s->hd);
+         if (redirects++ >= s->max_redirects) {
+             ret = AVERROR(EIO);
+             goto fail;
+-- 
+2.53.0.windows.2
+
